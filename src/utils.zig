@@ -32,6 +32,16 @@ pub fn numericToSymbolic(allocator: Allocator, oid: []const u8) SnmpError!?[]u8 
     return oidToString(allocator, &oid_arr[0], oid_arr_len) catch null;
 }
 
+/// Convert a Zig string to a null-terminated array for C API usage
+pub fn stringToNullTerminated(str: []const u8) SnmpError![MAX_OID_STR_LEN]u8 {
+    if (str.len >= MAX_OID_STR_LEN) return SnmpError.OidParseFailed;
+
+    var result: [MAX_OID_STR_LEN]u8 = undefined;
+    @memcpy(result[0..str.len], str);
+    result[str.len] = 0;
+    return result;
+}
+
 /// Utility functions for common OIDs
 pub const CommonOids = struct {
     pub const system = ".1.3.6.1.2.1.1";

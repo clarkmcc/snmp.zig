@@ -14,6 +14,17 @@ test "snmp client integration test" {
     });
     defer client.deinit();
 
+    // Test SNMP GET
+    var r1 = try client.get(allocator, ".1.3.6.1.4.1.8072.9999.1.0");
+    defer r1.deinit(allocator);
+    std.debug.assert(r1.integer == 42);
+
+    // Test SNMP GETNEXT
+    var r2 = try client.getNext(allocator, ".1.3.6.1.4.1.8072.9999.4.0");
+    defer r2.deinit(allocator);
+    std.debug.assert(r2.value.counter == 123_456_789);
+
+    // Test SNMP WALK
     var walk = try client.walk(allocator, ".1.3.6.1.4.1.8072.9999");
     defer walk.deinit();
 

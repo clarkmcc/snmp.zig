@@ -150,38 +150,97 @@ pub fn deinit(self: *Client) void {
     _ = c.snmp_close(self.session);
 }
 
-/// Perform an SNMP GET operation
-pub fn get(self: *Client, allocator: Allocator, oid: []const u8) SnmpError!Value {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+/// Generic request context for building different PDU types
+const RequestContext = struct {
+    pdu_type: c_int,
+    oids: []const []const u8 = &.{},
+    bindings: []const VarBind = &.{},
+    non_repeaters: u8 = 0,
+    max_repetitions: u8 = 0,
 
-    const pdu = try createPduFromOid(c.SNMP_MSG_GET, oid);
-    // defer c.snmp_free_pdu(pdu);
+    /// Create a PDU from the request context
+    fn createPdu(self: RequestContext) SnmpError!*c.struct_snmp_pdu {
+        const pdu = c.snmp_pdu_create(self.pdu_type);
+        if (pdu == null) return SnmpError.PduCreationFailed;
+
+        // Handle GETBULK specific fields
+        if (self.pdu_type == c.SNMP_MSG_GETBULK) {
+            pdu.*.errstat = self.non_repeaters;
+            pdu.*.errindex = self.max_repetitions;
+        }
+
+        // Add OIDs for GET/GETNEXT/GETBULK operations
+        for (self.oids) |oid| {
+            try addOidToPdu(pdu, oid);
+        }
+
+        // Add variable bindings for SET operations
+        for (self.bindings) |binding| {
+            try addVarBindToPdu(pdu, binding);
+        }
+
+        return pdu;
+    }
+
+    /// Add a single OID to a PDU
+    fn addOidToPdu(pdu: *c.struct_snmp_pdu, oid: []const u8) SnmpError!void {
+        var oid_buf: [utils.MAX_OID_LEN]c.oid = undefined;
+        var oid_len: usize = oid_buf.len;
+
+        const oid_cstr = try utils.stringToNullTerminated(oid);
+        if (c.snmp_parse_oid(@ptrCast(&oid_cstr), &oid_buf[0], &oid_len) == 0) {
+            return SnmpError.OidParseFailed;
+        }
+
+        _ = c.snmp_add_null_var(pdu, &oid_buf[0], oid_len);
+    }
+};
+
+/// Generic SNMP request handler that reduces duplication
+fn executeRequest(self: *Client, context: RequestContext) SnmpError!*c.struct_snmp_pdu {
+    const pdu = try context.createPdu();
+    errdefer c.snmp_free_pdu(pdu);
 
     var resp_pdu: ?*c.struct_snmp_pdu = null;
     const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
 
     if (resp_pdu) |response| {
-        defer c.snmp_free_pdu(response);
-
         if (status != c.SNMP_ERR_NOERROR) {
+            c.snmp_free_pdu(response);
             try handleSnmpStatus(status);
         }
 
         if (response.errstat != c.SNMP_ERR_NOERROR) {
+            c.snmp_free_pdu(response);
             try handleSnmpStatus(response.errstat);
         }
 
-        if (response.variables == null) {
-            return SnmpError.NoSuchName;
-        }
-
-        var vb = response.variables[0];
-
-        return parseValue(allocator, &vb);
+        return response;
     } else {
         return SnmpError.Timeout;
     }
+}
+
+/// Perform an SNMP GET operation
+pub fn get(self: *Client, allocator: Allocator, oid: []const u8) SnmpError!Value {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    const context = RequestContext{
+        .pdu_type = c.SNMP_MSG_GET,
+        .oids = &.{oid},
+    };
+
+    const response = try self.executeRequest(context);
+    defer c.snmp_free_pdu(response);
+
+    if (response.variables == null) {
+        return SnmpError.NoSuchName;
+    }
+    // `response.variables` can legally be null, but we have already
+    // returned early when that happens, so cast away the `allowzero`
+    // qualifier before passing it to `parseValue`.
+    return parseValue(allocator, @ptrCast(response.variables));
 }
 
 /// Perform an SNMP GETNEXT operation
@@ -189,38 +248,26 @@ pub fn getNext(self: *Client, allocator: Allocator, oid: []const u8) SnmpError!O
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    const pdu = try createPduFromOid(c.SNMP_MSG_GETNEXT, oid);
-    defer c.snmp_free_pdu(pdu);
+    const context = RequestContext{
+        .pdu_type = c.SNMP_MSG_GETNEXT,
+        .oids = &.{oid},
+    };
 
-    var resp_pdu: ?*c.struct_snmp_pdu = null;
-    const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
+    const response = try self.executeRequest(context);
+    defer c.snmp_free_pdu(response);
 
-    if (resp_pdu) |response| {
-        defer c.snmp_free_pdu(response);
-
-        if (status != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(status);
-        }
-
-        if (response.errstat != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(response.errstat);
-        }
-
-        if (response.variables == null) {
-            return SnmpError.NoSuchName;
-        }
-
-        const vb = response.variables[0];
-        const oid_str = try utils.oidToString(allocator, vb.name, vb.name_length);
-        const value = try parseValue(allocator, vb);
-
-        return OidValue{
-            .oid = oid_str,
-            .value = value,
-        };
-    } else {
-        return SnmpError.Timeout;
+    if (response.variables == null) {
+        return SnmpError.NoSuchName;
     }
+
+    const vb = response.variables[0];
+    const oid_str = try utils.oidToString(allocator, vb.name, vb.name_length);
+    const value = try parseValue(allocator, @constCast(&vb));
+
+    return OidValue{
+        .oid = oid_str,
+        .value = value,
+    };
 }
 
 /// Perform an SNMP SET operation
@@ -228,31 +275,13 @@ pub fn set(self: *Client, bindings: []const VarBind) SnmpError!void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    const pdu = c.snmp_pdu_create(c.SNMP_MSG_SET);
-    if (pdu == null) return SnmpError.PduCreationFailed;
-    defer c.snmp_free_pdu(pdu);
+    const context = RequestContext{
+        .pdu_type = c.SNMP_MSG_SET,
+        .bindings = bindings,
+    };
 
-    // Add all variable bindings
-    for (bindings) |binding| {
-        try addVarBindToPdu(pdu, binding);
-    }
-
-    var resp_pdu: ?*c.struct_snmp_pdu = null;
-    const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
-
-    if (resp_pdu) |response| {
-        defer c.snmp_free_pdu(response);
-
-        if (status != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(status);
-        }
-
-        if (response.errstat != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(response.errstat);
-        }
-    } else {
-        return SnmpError.Timeout;
-    }
+    const response = try self.executeRequest(context);
+    defer c.snmp_free_pdu(response);
 }
 
 /// Perform an SNMP GETBULK operation (SNMPv2c and v3 only)
@@ -264,63 +293,180 @@ pub fn getBulk(self: *Client, allocator: Allocator, oid: []const u8, non_repeate
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    const pdu = try createPduFromOid(c.SNMP_MSG_GETBULK, oid);
-    defer c.snmp_free_pdu(pdu);
+    const context = RequestContext{
+        .pdu_type = c.SNMP_MSG_GETBULK,
+        .oids = &.{oid},
+        .non_repeaters = non_repeaters,
+        .max_repetitions = max_repetitions,
+    };
 
-    pdu.errstat = non_repeaters; // Non-repeaters
-    pdu.errindex = max_repetitions; // Max-repetitions
+    const response = try self.executeRequest(context);
+    defer c.snmp_free_pdu(response);
 
-    var resp_pdu: ?*c.struct_snmp_pdu = null;
-    const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
-
-    if (resp_pdu) |response| {
-        defer c.snmp_free_pdu(response);
-
-        if (status != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(status);
-        }
-
-        if (response.errstat != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(response.errstat);
-        }
-
-        return parseMultipleVariables(allocator, response.variables);
-    } else {
-        return SnmpError.Timeout;
-    }
+    return parseMultipleVariables(allocator, response.variables);
 }
 
-/// Perform an SNMP walk operation
-pub fn walk(self: *Client, allocator: Allocator, base_oid: []const u8) SnmpError!SnmpResult {
+/// Get multiple OIDs in a single request
+pub fn getMultiple(self: *Client, allocator: Allocator, oids: []const []const u8) SnmpError!SnmpResult {
     self.mutex.lock();
     defer self.mutex.unlock();
 
+    const context = RequestContext{
+        .pdu_type = c.SNMP_MSG_GET,
+        .oids = oids,
+    };
+
+    const response = try self.executeRequest(context);
+    defer c.snmp_free_pdu(response);
+
+    return parseMultipleVariables(allocator, response.variables);
+}
+
+/// State container used during a walk/bulk‑walk traversal.
+///
+/// A `WalkState` instance tracks the *cursor* OID that will be supplied in the
+/// next `GETNEXT`/`GETBULK` request and provides helper methods that keep the
+/// calling loop concise.
+///
+/// The struct stores both the original `base_oid` string and a numeric,
+/// pre‑parsed copy so prefix checks do not allocate or parse on every
+/// iteration.  All scratch space is kept inside the struct so the walk loop
+/// itself remains allocation‑free.
+const WalkState = struct {
+    /// The *subtree root* originally supplied by the caller.
+    base_oid: []const u8,
+    /// Buffer containing the numeric OID that will be used in the next request.
+    current_oid: [utils.MAX_OID_LEN]c.oid,
+    /// Number of valid elements in `current_oid`.
+    current_oid_len: usize,
+    /// Parsed numeric representation of `base_oid` for constant‑time prefix checks.
+    base_oid_parsed: [utils.MAX_OID_LEN]c.oid,
+    /// Length of the valid prefix stored in `base_oid_parsed`.
+    base_oid_len: usize,
+    /// Allocator forwarded from the caller for any on‑the‑fly conversions.
+    allocator: Allocator,
+
+    /// Constructs a `WalkState` for the supplied `base_oid`.
+    ///
+    /// The cursor is initialised to the base OID itself.  Parsing is done
+    /// once up‑front so subsequent iterations can reuse the numeric form.
+    ///
+    /// Returns `SnmpError.OidParseFailed` when the provided string cannot
+    /// be parsed by Net‑SNMP.
+    fn init(allocator: Allocator, base_oid: []const u8) SnmpError!WalkState {
+        var current_oid: [utils.MAX_OID_LEN]c.oid = undefined;
+        var current_oid_len: usize = current_oid.len;
+
+        const oid_cstr = try utils.stringToNullTerminated(base_oid);
+        if (c.snmp_parse_oid(@ptrCast(&oid_cstr), &current_oid[0], &current_oid_len) == 0) {
+            return SnmpError.OidParseFailed;
+        }
+
+        var base_oid_parsed: [utils.MAX_OID_LEN]c.oid = undefined;
+        @memcpy(base_oid_parsed[0..current_oid_len], current_oid[0..current_oid_len]);
+
+        return WalkState{
+            .base_oid = base_oid,
+            .current_oid = current_oid,
+            .current_oid_len = current_oid_len,
+            .base_oid_parsed = base_oid_parsed,
+            .base_oid_len = current_oid_len,
+            .allocator = allocator,
+        };
+    }
+
+    /// Returns `true` when `vb` still belongs to the subtree rooted at
+    /// `base_oid`, permitting the walk to continue.
+    fn isWithinBaseOid(self: WalkState, vb: *c.struct_variable_list) bool {
+        if (vb.name_length < self.base_oid_len) return false;
+
+        const vb_oid_prefix = vb.name[0..self.base_oid_len];
+        const base_oid_slice = self.base_oid_parsed[0..self.base_oid_len];
+
+        return std.mem.eql(c.oid, vb_oid_prefix, base_oid_slice);
+    }
+
+    /// Advances the cursor to the OID contained in `vb`.
+    ///
+    /// Must be called *after* the caller has processed a variable binding
+    /// that was deemed valid.
+    fn updateCurrent(self: *WalkState, vb: *c.struct_variable_list) void {
+        self.current_oid_len = vb.name_length;
+        @memcpy(self.current_oid[0..self.current_oid_len], vb.name[0..vb.name_length]);
+    }
+
+    /// Detects agent‑signalled termination markers (`NoSuchObject`,
+    /// `NoSuchInstance`, `EndOfMibView`).
+    fn isEndOfWalk(vb: *c.struct_variable_list) bool {
+        return vb.type == c.SNMP_NOSUCHOBJECT or
+            vb.type == c.SNMP_NOSUCHINSTANCE or
+            vb.type == c.SNMP_ENDOFMIBVIEW;
+    }
+};
+
+/// Perform an SNMP walk operation
+pub fn walk(self: *Client, allocator: Allocator, base_oid: []const u8) SnmpError!SnmpResult {
+    return self.walkWithOperation(allocator, base_oid, .getnext);
+}
+
+/// Perform a bulk walk operation (more efficient for large datasets)
+pub fn bulkWalk(self: *Client, allocator: Allocator, base_oid: []const u8, max_repetitions: u8) SnmpError!SnmpResult {
+    if (self.options.version == .v1) {
+        return self.walk(allocator, base_oid);
+    }
+    return self.walkWithOperation(allocator, base_oid, .{
+        .getbulk = max_repetitions,
+    });
+}
+
+/// Walk operation type
+const WalkOperation = union(enum) {
+    getnext,
+    getbulk: u8, // max_repetitions
+};
+
+/// Generic walk implementation
+fn walkWithOperation(self: *Client, allocator: Allocator, base_oid: []const u8, operation: WalkOperation) SnmpError!SnmpResult {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    var state = try WalkState.init(allocator, base_oid);
     var result = SnmpResult.init(allocator);
     var items = std.ArrayList(OidValue).init(allocator);
     defer items.deinit();
 
-    // Parse the base OID
-    var current_oid: [utils.MAX_OID_LEN]c.oid = undefined;
-    var current_oid_len: usize = current_oid.len;
-    if (c.snmp_parse_oid(@ptrCast(base_oid.ptr), &current_oid[0], &current_oid_len) == 0) {
-        return SnmpError.OidParseFailed;
-    }
-
-    // Store the base OID for range checking
-    var base_oid_parsed: [utils.MAX_OID_LEN]c.oid = undefined;
-    const base_oid_len = current_oid_len;
-    @memcpy(base_oid_parsed[0..base_oid_len], current_oid[0..current_oid_len]);
-
     var iterations: u32 = 0;
-    const max_iterations = 1_000_000; // Prevent infinite loops
+
+    // Determine maximum iterations based on SNMP version and operation type
+    // SNMP v1 does not support GETBULK.
+    const max_iterations: usize = switch (self.options.version) {
+        .v1 => 1_000_000,
+        .v2c, .v3 => switch (operation) {
+            .getnext => 1_000_000,
+            .getbulk => 10_000,
+        },
+    };
 
     while (iterations < max_iterations) {
         iterations += 1;
 
-        // Create GETNEXT PDU
-        const pdu = c.snmp_pdu_create(c.SNMP_MSG_GETNEXT);
-        if (pdu == null) return SnmpError.OutOfMemory;
-        _ = c.snmp_add_null_var(pdu, &current_oid[0], current_oid_len);
+        // For walk operations, we need to create PDUs directly rather than use the generic context
+        const pdu = switch (operation) {
+            .getnext => blk: {
+                const p = c.snmp_pdu_create(c.SNMP_MSG_GETNEXT);
+                if (p == null) return SnmpError.OutOfMemory;
+                _ = c.snmp_add_null_var(p, &state.current_oid[0], state.current_oid_len);
+                break :blk p;
+            },
+            .getbulk => |max_reps| blk: {
+                const p = c.snmp_pdu_create(c.SNMP_MSG_GETBULK);
+                if (p == null) return SnmpError.OutOfMemory;
+                p.*.errstat = 0; // non_repeaters
+                p.*.errindex = max_reps; // max_repetitions
+                _ = c.snmp_add_null_var(p, &state.current_oid[0], state.current_oid_len);
+                break :blk p;
+            },
+        };
 
         var resp_pdu: ?*c.struct_snmp_pdu = null;
         const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
@@ -334,36 +480,36 @@ pub fn walk(self: *Client, allocator: Allocator, base_oid: []const u8) SnmpError
 
             const vb = response.variables orelse break;
 
-            // Check for end conditions
-            if (vb.*.type == c.SNMP_NOSUCHOBJECT or
-                vb.*.type == c.SNMP_NOSUCHINSTANCE or
-                vb.*.type == c.SNMP_ENDOFMIBVIEW)
-            {
-                break;
+            switch (operation) {
+                .getnext => {
+                    if (WalkState.isEndOfWalk(vb) or !state.isWithinBaseOid(vb)) break;
+
+                    const oid_str = try utils.oidToString(allocator, vb.*.name, vb.*.name_length);
+                    const value = try parseValue(allocator, vb);
+
+                    try items.append(OidValue{ .oid = oid_str, .value = value });
+                    state.updateCurrent(vb);
+                },
+                .getbulk => {
+                    var found_valid = false;
+                    var current_var = vb;
+
+                    while (current_var) |v| {
+                        if (WalkState.isEndOfWalk(v) or !state.isWithinBaseOid(v)) break;
+
+                        const oid_str = try utils.oidToString(allocator, v.*.name, v.*.name_length);
+                        const value = try parseValue(allocator, v);
+
+                        try items.append(OidValue{ .oid = oid_str, .value = value });
+                        state.updateCurrent(v);
+                        found_valid = true;
+
+                        current_var = v.*.next_variable;
+                    }
+
+                    if (!found_valid) break;
+                },
             }
-
-            // Check if we're still within the base OID tree
-            if (vb.*.name_length < base_oid_len) break;
-
-            const vb_oid_prefix = vb.*.name[0..base_oid_len];
-            const base_oid_slice = base_oid_parsed[0..base_oid_len];
-
-            if (!std.mem.eql(c.oid, vb_oid_prefix, base_oid_slice)) {
-                break;
-            }
-
-            // Parse the OID and value
-            const oid_str = try utils.oidToString(allocator, vb.*.name, vb.*.name_length);
-            const value = try parseValue(allocator, vb);
-
-            try items.append(OidValue{
-                .oid = oid_str,
-                .value = value,
-            });
-
-            // Update current OID for next iteration
-            current_oid_len = vb.*.name_length;
-            @memcpy(current_oid[0..current_oid_len], vb.*.name[0..vb.*.name_length]);
         } else {
             return SnmpError.Timeout;
         }
@@ -371,108 +517,6 @@ pub fn walk(self: *Client, allocator: Allocator, base_oid: []const u8) SnmpError
 
     result.items = try items.toOwnedSlice();
     return result;
-}
-
-/// Perform a bulk walk operation (more efficient for large datasets)
-pub fn bulkWalk(self: *Client, allocator: Allocator, base_oid: []const u8, max_repetitions: u8) SnmpError!SnmpResult {
-    if (self.options.version == .v1) {
-        // Fall back to regular walk for SNMPv1
-        return self.walk(allocator, base_oid);
-    }
-
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    var result = SnmpResult.init(allocator);
-    var items = std.ArrayList(OidValue).init(allocator);
-    defer items.deinit();
-
-    var current_oid = try allocator.dupe(u8, base_oid);
-    defer allocator.free(current_oid);
-
-    var iterations: u32 = 0;
-    const max_iterations = 10_000; // Prevent infinite loops
-
-    while (iterations < max_iterations) {
-        iterations += 1;
-
-        const bulk_result = self.getBulk(allocator, current_oid, 0, max_repetitions) catch |err| {
-            return err;
-        };
-        defer {
-            var mut_result = bulk_result;
-            mut_result.deinit();
-        }
-
-        if (bulk_result.items.len == 0) break;
-
-        var found_valid = false;
-        for (bulk_result.items) |item| {
-            // Check if we're still within the base OID tree
-            if (std.mem.startsWith(u8, item.oid, base_oid)) {
-                try items.append(try item.clone(allocator));
-                found_valid = true;
-                // Update current OID to the last one we processed
-                allocator.free(current_oid);
-                current_oid = try allocator.dupe(u8, item.oid);
-            } else {
-                // We've moved beyond our base OID
-                break;
-            }
-        }
-
-        if (!found_valid) break;
-    }
-
-    result.items = try items.toOwnedSlice();
-    return result;
-}
-
-/// Get multiple OIDs in a single request
-pub fn getMultiple(self: *Client, allocator: Allocator, oids: []const []const u8) SnmpError!SnmpResult {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    const pdu = c.snmp_pdu_create(c.SNMP_MSG_GET);
-    if (pdu == null) return SnmpError.PduCreationFailed;
-    // defer c.snmp_free_pdu(pdu);
-
-    // Add all OIDs to the PDU
-    for (oids) |oid| {
-        var oid_buf: [utils.MAX_OID_LEN]c.oid = undefined;
-        var oid_len: usize = oid_buf.len;
-
-        var oid_cstr: [utils.MAX_OID_STR_LEN]u8 = undefined;
-        if (oid.len >= oid_cstr.len) return SnmpError.OidParseFailed;
-
-        @memcpy(oid_cstr[0..oid.len], oid);
-        oid_cstr[oid.len] = 0;
-
-        if (c.snmp_parse_oid(@ptrCast(&oid_cstr[0]), &oid_buf[0], &oid_len) == 0) {
-            return SnmpError.OidParseFailed;
-        }
-
-        _ = c.snmp_add_null_var(pdu, &oid_buf[0], oid_len);
-    }
-
-    var resp_pdu: ?*c.struct_snmp_pdu = null;
-    const status = c.snmp_synch_response(self.session, pdu, &resp_pdu);
-
-    if (resp_pdu) |response| {
-        defer c.snmp_free_pdu(response);
-
-        if (status != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(status);
-        }
-
-        if (response.errstat != c.SNMP_ERR_NOERROR) {
-            try handleSnmpStatus(response.errstat);
-        }
-
-        return parseMultipleVariables(allocator, response.variables);
-    } else {
-        return SnmpError.Timeout;
-    }
 }
 
 /// Parse multiple variables from a response
@@ -503,13 +547,8 @@ fn addVarBindToPdu(pdu: *c.struct_snmp_pdu, binding: VarBind) SnmpError!void {
     var oid_buf: [utils.MAX_OID_LEN]c.oid = undefined;
     var oid_len: usize = oid_buf.len;
 
-    var oid_cstr: [utils.MAX_OID_STR_LEN]u8 = undefined;
-    if (binding.oid.len >= oid_cstr.len) return SnmpError.OidParseFailed;
-
-    @memcpy(oid_cstr[0..binding.oid.len], binding.oid);
-    oid_cstr[binding.oid.len] = 0;
-
-    if (c.snmp_parse_oid(@ptrCast(&oid_cstr[0]), &oid_buf[0], &oid_len) == 0) {
+    const oid_cstr = try utils.stringToNullTerminated(binding.oid);
+    if (c.snmp_parse_oid(@ptrCast(&oid_cstr), &oid_buf[0], &oid_len) == 0) {
         return SnmpError.OidParseFailed;
     }
 
@@ -536,13 +575,8 @@ fn addVarBindToPdu(pdu: *c.struct_snmp_pdu, binding: VarBind) SnmpError!void {
             var val_oid: [utils.MAX_OID_LEN]c.oid = undefined;
             var val_oid_len: usize = val_oid.len;
 
-            var val_cstr: [utils.MAX_OID_STR_LEN]u8 = undefined;
-            if (val.len >= val_cstr.len) return SnmpError.OidParseFailed;
-
-            @memcpy(val_cstr[0..val.len], val);
-            val_cstr[val.len] = 0;
-
-            if (c.snmp_parse_oid(@ptrCast(&val_cstr[0]), &val_oid[0], &val_oid_len) == 0) {
+            const val_cstr = try utils.stringToNullTerminated(val);
+            if (c.snmp_parse_oid(@ptrCast(&val_cstr), &val_oid[0], &val_oid_len) == 0) {
                 return SnmpError.OidParseFailed;
             }
 
@@ -550,29 +584,6 @@ fn addVarBindToPdu(pdu: *c.struct_snmp_pdu, binding: VarBind) SnmpError!void {
         },
         else => return SnmpError.WrongType,
     }
-}
-
-/// Create a PDU from an OID string
-fn createPduFromOid(pdu_type: c_int, oid: []const u8) SnmpError!*c.struct_snmp_pdu {
-    var oid_buf: [utils.MAX_OID_LEN]c.oid = undefined;
-    var oid_len: usize = oid_buf.len;
-
-    // Ensure null termination for C string
-    var oid_cstr: [utils.MAX_OID_STR_LEN]u8 = undefined;
-    if (oid.len >= oid_cstr.len) return SnmpError.OidParseFailed;
-
-    @memcpy(oid_cstr[0..oid.len], oid);
-    oid_cstr[oid.len] = 0;
-
-    if (c.snmp_parse_oid(@ptrCast(&oid_cstr[0]), &oid_buf[0], &oid_len) == 0) {
-        return SnmpError.OidParseFailed;
-    }
-
-    const pdu = c.snmp_pdu_create(pdu_type);
-    if (pdu == null) return SnmpError.PduCreationFailed;
-
-    _ = c.snmp_add_null_var(pdu, &oid_buf[0], oid_len);
-    return pdu;
 }
 
 /// Handle SNMP status codes and convert to appropriate errors
