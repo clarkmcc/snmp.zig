@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    integration_test.linkLibC();
     integration_test.root_module.addImport("snmp", lib_mod);
     const run_integration = b.addRunArtifact(integration_test);
     const integration_step = b.step("integration", "Run integration tests");
