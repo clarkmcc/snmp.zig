@@ -83,30 +83,55 @@ pub fn init(options: Options) SnmpError!Client {
             session.securityNameLen = v3_sec.security_name.len;
 
             // Authentication
-            // if (v3_sec.auth_protocol != .none) {
-            //     if (v3_sec.auth_protocol.toOid()) |auth_oid| {
-            //         session.securityAuthProto = @constCast(auth_oid.ptr);
-            //         session.securityAuthProtoLen = auth_oid.len;
-            //     }
+            if (v3_sec.auth_protocol != .none) {
+                if (v3_sec.auth_protocol.toOid()) |auth_oid| {
+                    session.securityAuthProto = @constCast(auth_oid.ptr);
+                    session.securityAuthProtoLen = auth_oid.len;
+                }
 
-            //     if (v3_sec.auth_passphrase) |passphrase| {
-            //         session.securityAuthKey = c.strdup(@ptrCast(passphrase.ptr)) orelse return SnmpError.OutOfMemory;
-            //         session.securityAuthKeyLen = passphrase.len;
-            //     }
-            // }
+                if (v3_sec.auth_passphrase) |passphrase| {
+                    // Set initial key length
+                    session.securityAuthKeyLen = session.securityAuthKey.len;
 
-            // // Privacy
-            // if (v3_sec.priv_protocol != .none) {
-            //     if (v3_sec.priv_protocol.toOid()) |priv_oid| {
-            //         session.securityPrivProto = @ptrCast(priv_oid.ptr);
-            //         session.securityPrivProtoLen = priv_oid.len;
-            //     }
+                    // Generate Ku from passphrase
+                    const passphrase_cstr = try utils.stringToNullTerminated(passphrase);
+                    if (c.generate_Ku(session.securityAuthProto,
+                                    @intCast(session.securityAuthProtoLen),
+                                    @ptrCast(&passphrase_cstr[0]), passphrase.len,
+                                    &session.securityAuthKey,
+                                    &session.securityAuthKeyLen) != c.SNMPERR_SUCCESS) {
+                        return SnmpError.SessionConfigFailed;
+                    }
+                }
+            }
 
-            //     if (v3_sec.priv_passphrase) |passphrase| {
-            //         session.securityPrivKey = c.strdup(@ptrCast(passphrase.ptr)) orelse return SnmpError.OutOfMemory;
-            //         session.securityPrivKeyLen = passphrase.len;
-            //     }
-            // }
+            // Privacy
+            if (v3_sec.priv_protocol != .none) {
+                // Privacy requires authentication
+                if (v3_sec.auth_protocol == .none) {
+                    return SnmpError.InvalidSecurity;
+                }
+
+                if (v3_sec.priv_protocol.toOid()) |priv_oid| {
+                    session.securityPrivProto = @constCast(priv_oid.ptr);
+                    session.securityPrivProtoLen = priv_oid.len;
+                }
+
+                if (v3_sec.priv_passphrase) |passphrase| {
+                    // Set initial key length
+                    session.securityPrivKeyLen = session.securityPrivKey.len;
+
+                    // Generate Ku from passphrase using the same auth protocol
+                    const passphrase_cstr = try utils.stringToNullTerminated(passphrase);
+                    if (c.generate_Ku(session.securityAuthProto,
+                                    @intCast(session.securityAuthProtoLen),
+                                    @ptrCast(&passphrase_cstr[0]), passphrase.len,
+                                    &session.securityPrivKey,
+                                    &session.securityPrivKeyLen) != c.SNMPERR_SUCCESS) {
+                        return SnmpError.SessionConfigFailed;
+                    }
+                }
+            }
 
             // Context
             if (v3_sec.context_name) |context| {
@@ -125,6 +150,7 @@ pub fn init(options: Options) SnmpError!Client {
     // Open the session
     const netsnmp_session = c.snmp_open(&session);
     if (netsnmp_session == null) {
+        freeSessionStrings(&session);
         return SnmpError.SessionOpenFailed;
     }
 
