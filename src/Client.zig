@@ -95,11 +95,7 @@ pub fn init(options: Options) SnmpError!Client {
 
                     // Generate Ku from passphrase
                     const passphrase_cstr = try utils.stringToNullTerminated(passphrase);
-                    if (c.generate_Ku(session.securityAuthProto,
-                                    @intCast(session.securityAuthProtoLen),
-                                    @ptrCast(&passphrase_cstr[0]), passphrase.len,
-                                    &session.securityAuthKey,
-                                    &session.securityAuthKeyLen) != c.SNMPERR_SUCCESS) {
+                    if (c.generate_Ku(session.securityAuthProto, @intCast(session.securityAuthProtoLen), @ptrCast(&passphrase_cstr[0]), passphrase.len, &session.securityAuthKey, &session.securityAuthKeyLen) != c.SNMPERR_SUCCESS) {
                         return SnmpError.SessionConfigFailed;
                     }
                 }
@@ -123,11 +119,7 @@ pub fn init(options: Options) SnmpError!Client {
 
                     // Generate Ku from passphrase using the same auth protocol
                     const passphrase_cstr = try utils.stringToNullTerminated(passphrase);
-                    if (c.generate_Ku(session.securityAuthProto,
-                                    @intCast(session.securityAuthProtoLen),
-                                    @ptrCast(&passphrase_cstr[0]), passphrase.len,
-                                    &session.securityPrivKey,
-                                    &session.securityPrivKeyLen) != c.SNMPERR_SUCCESS) {
+                    if (c.generate_Ku(session.securityAuthProto, @intCast(session.securityAuthProtoLen), @ptrCast(&passphrase_cstr[0]), passphrase.len, &session.securityPrivKey, &session.securityPrivKeyLen) != c.SNMPERR_SUCCESS) {
                         return SnmpError.SessionConfigFailed;
                     }
                 }

@@ -34,10 +34,10 @@ pub const AuthProtocol = enum {
             .none => null,
             .md5 => c.usmHMACMD5AuthProtocol[0..c.USM_AUTH_PROTO_MD5_LEN],
             .sha1 => c.usmHMACSHA1AuthProtocol[0..c.USM_AUTH_PROTO_SHA_LEN],
-            .sha224 => if (@hasDecl(c, "usmHMAC128SHA224AuthProtocol")) c.usmHMAC128SHA224AuthProtocol[0..c.USM_AUTH_PROTO_SHA224_LEN] else null,
-            .sha256 => if (@hasDecl(c, "usmHMAC192SHA256AuthProtocol")) c.usmHMAC192SHA256AuthProtocol[0..c.USM_AUTH_PROTO_SHA256_LEN] else null,
-            .sha384 => if (@hasDecl(c, "usmHMAC256SHA384AuthProtocol")) c.usmHMAC256SHA384AuthProtocol[0..c.USM_AUTH_PROTO_SHA384_LEN] else null,
-            .sha512 => if (@hasDecl(c, "usmHMAC384SHA512AuthProtocol")) c.usmHMAC384SHA512AuthProtocol[0..c.USM_AUTH_PROTO_SHA512_LEN] else null,
+            .sha224 => if (@hasDecl(c, "usmHMAC128SHA224AuthProtocol") and @hasDecl(c, "USM_AUTH_PROTO_SHA224_LEN")) c.usmHMAC128SHA224AuthProtocol[0..c.USM_AUTH_PROTO_SHA224_LEN] else null,
+            .sha256 => if (@hasDecl(c, "usmHMAC192SHA256AuthProtocol") and @hasDecl(c, "USM_AUTH_PROTO_SHA256_LEN")) c.usmHMAC192SHA256AuthProtocol[0..c.USM_AUTH_PROTO_SHA256_LEN] else null,
+            .sha384 => if (@hasDecl(c, "usmHMAC256SHA384AuthProtocol") and @hasDecl(c, "USM_AUTH_PROTO_SHA384_LEN")) c.usmHMAC256SHA384AuthProtocol[0..c.USM_AUTH_PROTO_SHA384_LEN] else null,
+            .sha512 => if (@hasDecl(c, "usmHMAC384SHA512AuthProtocol") and @hasDecl(c, "USM_AUTH_PROTO_SHA512_LEN")) c.usmHMAC384SHA512AuthProtocol[0..c.USM_AUTH_PROTO_SHA512_LEN] else null,
         };
     }
 };
@@ -54,9 +54,9 @@ pub const PrivProtocol = enum {
         return switch (self) {
             .none => null,
             .des => c.usmDESPrivProtocol[0..c.USM_PRIV_PROTO_DES_LEN],
-            .aes128 => if (@hasDecl(c, "usmAES128PrivProtocol")) c.usmAES128PrivProtocol[0..c.USM_PRIV_PROTO_AES128_LEN] else null,
-            .aes192 => if (@hasDecl(c, "usmAES192PrivProtocol")) c.usmAES192PrivProtocol[0..c.USM_PRIV_PROTO_AES192_LEN] else null,
-            .aes256 => if (@hasDecl(c, "usmAES256PrivProtocol")) c.usmAES256PrivProtocol[0..c.USM_PRIV_PROTO_AES256_LEN] else null,
+            .aes128 => if (@hasDecl(c, "usmAES128PrivProtocol") and @hasDecl(c, "USM_PRIV_PROTO_AES128_LEN")) c.usmAES128PrivProtocol[0..c.USM_PRIV_PROTO_AES128_LEN] else null,
+            .aes192 => if (@hasDecl(c, "usmAES192PrivProtocol") and @hasDecl(c, "USM_PRIV_PROTO_AES192_LEN")) c.usmAES192PrivProtocol[0..c.USM_PRIV_PROTO_AES192_LEN] else null,
+            .aes256 => if (@hasDecl(c, "usmAES256PrivProtocol") and @hasDecl(c, "USM_PRIV_PROTO_AES256_LEN")) c.usmAES256PrivProtocol[0..c.USM_PRIV_PROTO_AES256_LEN] else null,
         };
     }
 };
