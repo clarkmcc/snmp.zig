@@ -5,14 +5,13 @@ test "snmp client integration test" {
     const allocator = std.testing.allocator;
 
     // Configure client for SNMPv1.
-    const client_opts = snmp.Client.Options{
+    var client = try snmp.Client.init(.{
         .peername = "127.0.0.1:16161",
         .community = "public",
         .version = .v1,
         .timeout = 5_000_000, // microseconds
         .retries = 3,
-    };
-    var client = try snmp.Client.init(client_opts);
+    });
     defer client.deinit();
 
     var walk = try client.walk(allocator, ".1.3.6.1.4.1.8072.9999");
@@ -30,7 +29,6 @@ test "snmp client integration test" {
         skipped,
     };
 
-    // Compile‑time table of every OID/value pair we expect the agent to return.
     const expectations = [_]struct {
         oid: []const u8,
         value: Expected,
